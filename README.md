@@ -1,1 +1,0 @@
-# sympy2ipopt
