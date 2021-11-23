@@ -851,6 +851,9 @@ class Nlp :
       print(f'"{common_names}" are simultaneously used as variables and as user data')
       raise RuntimeError
 
+    if self.__objective == None :
+      raise RuntimeError('You should set objective function!')
+
     self.__fill_eval_f_body()
     self.__fill_eval_g_body()
     self.__fill_eval_grad_f_body()
