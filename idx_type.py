@@ -4,6 +4,10 @@ from sympy.core.assumptions import ManagedProperties
 from sympy import Idx, sympify
 from builtins import range as builtin_range
 
+class IdxOutOfRangeError(ValueError) :
+  '''Исключение выхода за границу типа индекса.'''
+  pass
+
 class IdxType(ManagedProperties) :
   '''Метакласс, экземпляры которого являются типами для индексов.
 
@@ -75,8 +79,7 @@ class IdxType(ManagedProperties) :
         print(f'Reverse indexing is not supported for type "{cls.__name__}"')
         raise ValueError
       if obj.lower < limits[0] or obj.upper > limits[1] :
-        print(f'Index out of range for type "{cls.__name__}"')
-        raise ValueError
+        raise IdxOutOfRangeError(f'Index out of range for type "{cls.__name__}"')
       return obj
     def t_len(self) :
       return self.upper - self.lower + 1

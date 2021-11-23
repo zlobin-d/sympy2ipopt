@@ -4,6 +4,7 @@ from collections import defaultdict
 from functools import reduce
 from sympy import Eq, srepr
 from sympy.codegen.ast import CodeBlock, continue_
+from sympy2ipopt.idx_type import IdxOutOfRangeError
 from sympy2ipopt.shifted_idx import ShiftedIdx
 from sympy2ipopt.utils.idx_utils import get_master_idx, get_shifts, get_types, IDummy, idx_subs, block_copy, block_size
 from sympy2ipopt.utils.code_utils import If, cxxcode, wrap_in_loop
@@ -310,10 +311,14 @@ class Part :
     term2 = p2.__term
     indices = block_copy(p1.__indices)
     dependent = {rel[1] for rel in p1.__relations.keys()}
-    for n, (i, i1, i2) in enumerate(zip(indices, p1.__indices, p2.__indices)) :
-      if n not in dependent :
-        term1 = idx_subs(term1, i1, i)
-        term2 = idx_subs(term2, i2, i)
+    # Попытка замены индексов здесь может привести к выходу из диапазона типа индекса, ловим IdxOutOfRangeError
+    try :
+      for n, (i, i1, i2) in enumerate(zip(indices, p1.__indices, p2.__indices)) :
+        if n not in dependent :
+          term1 = idx_subs(term1, i1, i)
+          term2 = idx_subs(term2, i2, i)
+    except IdxOutOfRangeError :
+      return False
     if term1 != term2 :
       return False
     return True
@@ -856,6 +861,12 @@ if __name__ == "__main__" :
   p1 = Part(None, (m1, n1, m2), m1**2)
   p2 = Part(None, (m2, n1, m1), m2**2)
   assert Part._is_same(p1, p2) == True
+
+  m0e = t1('m0e', (10, 10))
+  p1 = Part(None, (m0,), sm0**2)
+  p2 = Part(None, (m0e,), m0e**2)
+  assert Part._is_same(p1, p2) == False
+  assert Part._is_same(p2, p1) == False
 
   p1 = Part(None, (m1, n1, a1), m1)
   p2 = Part(None, (m1, n1, a1), n1)

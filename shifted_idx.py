@@ -1,5 +1,6 @@
 # vim: set fileencoding=utf8 :
 from sympy import AtomicExpr, Expr, S, sympify
+from sympy2ipopt.idx_type import IdxOutOfRangeError
 
 class ShiftedIdx(AtomicExpr) :
   '''Выражение, являющееся суммой индекса и числа, с которым можно работать как с индексом.
@@ -48,8 +49,7 @@ class ShiftedIdx(AtomicExpr) :
       return idx
     idx_type = type(idx)
     if idx.lower + shift < idx_type.start or idx.upper + shift > idx_type.end :
-      print(f'Index out of range for type "{idx_type.__name__}"')
-      raise ValueError
+      raise IdxOutOfRangeError(f'Index out of range for type "{idx_type.__name__}"')
     obj = super(cls, cls).__new__(cls, idx, shift, **kw_args)
     obj.__options = options
     return obj
