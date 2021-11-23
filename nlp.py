@@ -791,7 +791,8 @@ class Nlp :
     process_term(self.__obj_factor * self.__objective)
     # Получаем вклад от ограничений
     for constr, (offset, indices) in self.__constraints.items() :
-      process_term(Sum(indexed_for_array_elem(self.__lambda, indices, offset) * constr, *indices))
+      term = indexed_for_array_elem(self.__lambda, indices, offset) * constr
+      process_term(Sum(term, *indices) if indices else term)
     # Проходим по всем блокам гессиана
     for (row_id, col_id), hess_block in elems.items() :
       row_offset, row_indices = self.__variables[row_id]
@@ -1002,8 +1003,7 @@ public:
 
 #include <cstdio>
 #include <cmath>
-
-#include "''' + self.__name + '''_user_decls.h"
+''' + (f'\n#include "{self.__name}_user_decls.h"' if self.__user_data_decls else '') + '''
 
 using namespace Ipopt;
 
