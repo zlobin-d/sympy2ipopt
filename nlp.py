@@ -723,7 +723,7 @@ class Nlp :
         partial = self.__diff(self.__objective, var, used_indices, occurrences)
         # Добавляем код в тела соответствующих функций интерфейса IpOpt
         self.__eval_grad_f_decl.update(decl_for_indices(used_indices))
-        self.__eval_grad_f_body.append(assign_by_indices((self.__grad_f,), (partial,), used_indices, offset))
+        self.__eval_grad_f_body.append(assign_by_indices((self.__grad_f,), (partial,), used_indices, offset, part_of = indices))
 
   def __fill_eval_jac_g_body(self) :
     '''Генерируем код вычисления якобиана ограничений.'''

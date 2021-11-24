@@ -82,9 +82,10 @@ def elem_pos(strides, indices) :
   func = lambda expr, elem : expr * elem[0] + elem[1]
   return reduce(func, zip(strides, indices), S.Zero)
 
-def indexed_for_array_elem(array_name, indices, offset, **assumptions) :
-  shape = block_shape(indices)
-  offset = offset - elem_pos(shape, map(lambda idx : idx.lower, indices))
+def indexed_for_array_elem(array_name, indices, offset, *, part_of = None, **assumptions) :
+  part_of = part_of if part_of else indices
+  shape = block_shape(part_of)
+  offset = offset - elem_pos(shape, map(lambda idx : idx.lower, part_of))
   base = IndexedBaseWithOffset(array_name, shape = shape, offset = offset, **assumptions)
   return base[indices if indices else S.Zero]
 
@@ -160,8 +161,8 @@ def assign(array_names, values, indices = (), name_to_code = lambda name : name,
     body = preambula
   return cxxcode(CodeBlock(*body)).split('\n')
 
-def assign_by_indices(array_names, values, indices, offset) :
-  name_to_code = lambda name : indexed_for_array_elem(name, indices, offset)
+def assign_by_indices(array_names, values, indices, offset, *, part_of = None) :
+  name_to_code = lambda name : indexed_for_array_elem(name, indices, offset, part_of = part_of)
   return assign(array_names, values, indices, name_to_code)
 
 def assign_by_counter(array_names, values, indices, counter) :
@@ -234,6 +235,7 @@ if __name__ == "__main__" :
 
   assert indexed_for_array_elem(x, (j1, sj2, i3, sj4), 5).base == IndexedBaseWithOffset(x, (10, 3, 9, 3), -55)
   assert cxxcode(indexed_for_array_elem(x, (j1, sj2, i3, sj4), 5)) == 'x[-107 + 3*i3 + 27*j2 + 81*j1 + j4]'
+  assert indexed_for_array_elem(x, (k3,), 0, part_of = (i3,)).base == IndexedBaseWithOffset(x, (9,), 5)
 
   assert decl_for_indices((j1, sj2, i3, sj4)) == ['int j1;', 'int j2;', 'int i3;', 'int j4;']
   assert decl_for_indices((j1, k2, sk3, sj4)) == ['int j1;', 'int j4;']
