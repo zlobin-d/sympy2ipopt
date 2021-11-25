@@ -6,13 +6,15 @@ from itertools import product, starmap
 from sympy import Sum, diff, S, Function, Derivative, Dummy, Symbol
 from sympy2ipopt.shifted_idx import ShiftedIdx
 from sympy2ipopt.utils.idx_utils import get_master_idx, get_shifts, get_types, block_copy, idx_subs
-from sympy2ipopt.utils.expr_utils import RDummy, wrap_in_sum
+from sympy2ipopt.utils.expr_utils import RDummy, wrap_in_sum, prepare_expr
 
 def get_sum_with_indexed(expr, var) :
   ''' Находим Sum, в которых суммируется var.
 
   Пользуемся уникальностью индексов суммирования:
-  переменная, при которой есть некоторый индекс, не может суммироваться по нему в двух разных суммах.
+
+  #. переменная, при которой есть некоторый индекс, не может суммироваться по нему в двух разных суммах
+  #. это точно индекс суммирования, он не может совпасть с внешним индексом
   '''
 
   var_indices_set = set(get_master_idx(var.indices))
@@ -55,46 +57,8 @@ def diff_indexed(expr, var, occurrences) :
   derivative = S.Zero
   for occur in occurrences :
     derivative += partial(expr, var, occur)
-  return derivative
-
-'''
-
-def diff_indexed(expr, var) :
-  # Находим все суммы первого уровня вложенности такие, что в них суммируется var
-  sums = list(get_sums_with_indexed(expr, var))
-  # Вместо var используем уникальный символ в силу предположения, что все подблоки данной переменной не пересекакются
-  service_var = RDummy()
-  if sums :
-    # Обозначаем все суммы, в которых суммируется var, как f_i(service_var)
-    # Сохраняем информацию для обратных замен
-    funcs = list()
-    for s in sums :
-      f_i = Function(RDummy())(service_var)
-      funcs.append(f_i)
-      expr = expr.subs(s, f_i)
-  # Заменяем var в выражении вне сумм.
-  # Если var есть в сумме, то вне она может быть только с теми же (совпадение не только диапазонов, но и имен) индексами
-  # в силу предположения, что все подблоки данной переменной не пересекакются
-  expr = expr.subs(var, service_var)
-  # Дифференцируем
-  expr = diff(expr, service_var)
-  if sums :
-    var_indices_set = set(get_master_idx(var.indices))
-    # От суммы по индексу из набора индексов переменной всегда остается ровно одно слагаемое
-    for s, f in zip(sums, funcs) :
-      term, *indices = s.args
-      # Дифференцируем одно слагаемое, заменяя var на service_var. Вложенных Sum нет.
-      d_s = diff(term.subs(var, service_var), service_var).subs(service_var, var)
-      # Остаются суммы по тем индексам, от которых не зависит var, остальные индексы становятся свободными символами
-      d_s = wrap_in_sum(d_s, [idx for idx, *_ in indices if idx not in var_indices_set])
-      # Сначала заменяем производные f(var) на d_s
-      expr = expr.subs(Derivative(f, service_var), d_s)
-      # Затем обратная замена f(var) 
-      expr = expr.subs(f, s)
-  # Делаем обратную замену var вне сумм
-  expr = expr.subs(service_var, var)
-  return expr
-'''
+  # сохраняем условие уникальности индексов
+  return prepare_expr(derivative)
 
 if __name__ == "__main__" :
   from sympy import cos, sin, Idx, exp
