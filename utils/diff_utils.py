@@ -121,7 +121,7 @@ if __name__ == "__main__" :
   assert diff_indexed(sum7, b1[i1], (b1[i1],)) == 2 * b1[i1] * b2[i1]
   sum8 = Sum(b1[i1, j2, sj3, sj4]**2, i1, j2, j3)
   assert diff_indexed(sum8, b1[i1, j2, sj3, sj4], (b1[i1, j2, sj3, sj4],)) == 2 * b1[i1, j2, sj3, sj4]
-  assert diff_indexed(exp(sum8), b1[i1, j2, sj3, sj4], (b1[i1, j2, sj3, sj4],)) == exp(sum8) * 2 * b1[i1, j2, sj3, sj4]
+  assert renum_dummy(diff_indexed(exp(sum8), b1[i1, j2, sj3, sj4], (b1[i1, j2, sj3, sj4],))) == renum_dummy(prepare_expr(exp(sum8) * 2 * b1[i1, j2, sj3, sj4]))
   sum9 = Sum(b1[i1, j2, sj3, sj4]**2 + b2[l2], i1, j2, j3, l2)
   assert diff_indexed(sum9, b1[i1, j2, sj3, sj4], (b1[i1, j2, sj3, sj4],)) == 6 * b1[i1, j2, sj3, sj4]
   m0 = t1('m0', (0, 0))
@@ -134,7 +134,7 @@ if __name__ == "__main__" :
   assert diff_indexed(Sum((b1[j1] - b1[sj1])**2, j1), b1[m0], (b1[j1],)) == -2*b1[sm0] + 2*b1[m0]
   assert diff_indexed(Sum((b1[j1] - b1[sj1])**2, j1), b1[m1], (b1[j1], b1[sj1])) == -2*b1[sm1_1] - 2*b1[sm1_0] + 4*b1[m1]
   assert diff_indexed(Sum((b1[j1] - b1[sj1])**2, j1), b1[m2], (b1[sj1],)) == -2*b1[sm2] + 2*b1[m2]
-  assert diff_indexed(Sum(i2*(b1[j1] - b1[sj1])**2, j1, i2), b1[m1], (b1[j1], b1[sj1])) == Sum((-2*b1[sm1_1] + 2*b1[m1]) * i2, i2) + Sum((-2*b1[sm1_0] + 2*b1[m1]) * i2, i2)
+  assert renum_dummy(diff_indexed(Sum(i2*(b1[j1] - b1[sj1])**2, j1, i2), b1[m1], (b1[j1], b1[sj1]))) == renum_dummy(prepare_expr(Sum((-2*b1[sm1_1] + 2*b1[m1]) * i2, i2) + Sum((-2*b1[sm1_0] + 2*b1[m1]) * i2, i2)))
   n1 = t1('n1', (3, 5))
   assert diff_indexed(Sum(b1[sj1]**2, j1) + Sum(b1[m1]**2, m1), b1[n1], (b1[sj1], b1[m1])) == 4 * b1[n1]
   n2 = t2('n2', (3, 5))
