@@ -3,11 +3,12 @@
 from collections import defaultdict
 from functools import reduce
 from sympy import Eq, srepr
-from sympy.codegen.ast import CodeBlock, continue_
+from sympy.codegen.ast import CodeBlock, continue_, Element
+from sympy.codegen.cnodes import PreIncrement
 from sympy2ipopt.idx_type import IdxOutOfRangeError
 from sympy2ipopt.shifted_idx import ShiftedIdx
 from sympy2ipopt.utils.idx_utils import get_master_idx, get_shifts, get_types, IDummy, idx_subs, block_copy, block_size
-from sympy2ipopt.utils.code_utils import If, cxxcode, wrap_in_loop
+from sympy2ipopt.utils.code_utils import If, cxxcode, wrap_in_loop, assign
 
 def _master_block_size(indices) :
   return block_size(set(get_master_idx(indices)))
@@ -450,20 +451,21 @@ class Part :
       new_part.__term = idx_subs(new_part.__term, new_part.__indices[pos], pd.indices[0])
       new_part.__indices = new_part.__indices[:pos] + (pd.indices[0],) + new_part.__indices[pos + 1:]
     return new_part
-  def generate_loop(self, body, *, continue_cond = False) :
+  def generate_loop_by_counter(self, lhs, rhs, var_manager, counter, *, continue_cond = False) :
+    pre_iter = []
     excl_cond = False
     for (pos1, pos2), excludes in self.__excludes.items() :
       for shift in sorted(excludes) :
         excl_cond |= Eq(self.__indices[pos1], self.__indices[pos2] - shift)
-    if excl_cond != False :
-      body.insert(0, If(excl_cond, [continue_]))
     if continue_cond != False :
-      body.insert(0, If(continue_cond, [continue_]))
+      pre_iter.append(If(continue_cond, [continue_]))
+    if excl_cond != False :
+      pre_iter.append(If(excl_cond, [continue_]))
     dependent = {pos2 for pos1, pos2 in self.__relations.keys()}
     loop_indices = [idx for n, idx in enumerate(self.__indices) if n not in dependent]
-    body = wrap_in_loop(body, loop_indices)
-    return body
-
+    name_to_code = lambda name : Element(name, (counter,))
+    lhs = map(name_to_code, lhs)
+    return assign(lhs, rhs, get_master_idx(loop_indices), var_manager, pre_iter = pre_iter, post_iter = [PreIncrement(counter)])
 def _intersect_part(part1, part2) :
   ''' Находим пересечение двух частей. Результат -- часть, являющаяся пересечением исходных,
       и, возможно пустые, списки частей, принадлежащих только одной из исходных частей. '''
@@ -584,6 +586,7 @@ if __name__ == "__main__" :
   from sympy2ipopt.idx_type import IdxType
   from sympy2ipopt.utils.test_utils import renum_dummy, check_limits
   from sympy.codegen.ast import Assignment
+  from sympy2ipopt.utils.code_utils import TmpVarManager
 
   t1 = IdxType('t1', (0, 10))
   t2 = IdxType('t2', (2, 8))
@@ -1147,80 +1150,107 @@ if __name__ == "__main__" :
   assert cmp_with_diag((m2, n2, u1), (m1, n1, u1)) == (3678, 36, 486)
   assert cmp_with_diag((m2, u1, n2), (m1, u1, n1)) == (3678, 36, 486)
 
+  var_manager = TmpVarManager()
   p = Part(None, (m0, n1, sm0), sm0**2)
   assert len(p) == 50
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)])))).split('\n') == [
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'))) == [
           'for (_Dummy_1 = 0; _Dummy_1 < 10; _Dummy_1 += 1) {',
-          '   for (n1 = -5; n1 < 0; n1 += 1) {',
-          '      x = std::pow(1 + _Dummy_1, 2);',
+          '   for (_Dummy_2 = -5; _Dummy_2 < 0; _Dummy_2 += 1) {',
+          '      x[counter] = ((1 + _Dummy_1)*(1 + _Dummy_1));',
+          '      ++(counter);',
           '   };',
           '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;']
 
   p = Part(None, (k2, m3, m5, sk2), m3)
   assert len(p) == 72
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)])))).split('\n') == [
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'))) == [
+         'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
+         '   for (_Dummy_2 = 0; _Dummy_2 < 4; _Dummy_2 += 1) {',
+         '      for (_Dummy_3 = 0; _Dummy_3 < 6; _Dummy_3 += 1) {',
+         '         x[counter] = _Dummy_2;',
+         '         ++(counter);',
+         '      };',
+         '   };',
+         '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;',
+                                                                   'int _Dummy_3;']
+
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'), continue_cond = Symbol('x') < Symbol('y'))) == [
           'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
-          '   for (m3 = 0; m3 < 4; m3 += 1) {',
-          '      for (m5 = 0; m5 < 6; m5 += 1) {',
-          '         x = m3;',
-          '      };',
-          '   };',
-          '};']
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)], continue_cond = Symbol('x') < Symbol('y'))))).split('\n') == [
-          'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
-          '   for (m3 = 0; m3 < 4; m3 += 1) {',
-          '      for (m5 = 0; m5 < 6; m5 += 1) {',
+          '   for (_Dummy_2 = 0; _Dummy_2 < 4; _Dummy_2 += 1) {',
+          '      for (_Dummy_3 = 0; _Dummy_3 < 6; _Dummy_3 += 1) {',
           '         if (x < y) {',
           '            continue;',
           '         };',
-          '         x = m3;',
+          '         x[counter] = _Dummy_2;',
+          '         ++(counter);',
           '      };',
           '   };',
           '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;',
+                                                                   'int _Dummy_3;']
+
   p = p.set_pos(_Excl((1, 2), (m3, m5), {0}))
   assert len(p) == 68
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)])))).split('\n') == [
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'))) == [
+         'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
+         '   for (_Dummy_2 = 0; _Dummy_2 < 4; _Dummy_2 += 1) {',
+         '      for (_Dummy_3 = 0; _Dummy_3 < 6; _Dummy_3 += 1) {',
+         '         if (_Dummy_2 == _Dummy_3) {',
+         '            continue;',
+         '         };',
+         '         x[counter] = _Dummy_2;',
+         '         ++(counter);',
+         '      };',
+         '   };',
+         '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;',
+                                                                   'int _Dummy_3;']
+
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'), continue_cond = Symbol('x') < Symbol('y'))) == [
           'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
-          '   for (m3 = 0; m3 < 4; m3 += 1) {',
-          '      for (m5 = 0; m5 < 6; m5 += 1) {',
-          '         if (m3 == m5) {',
-          '            continue;',
-          '         };',
-          '         x = m3;',
-          '      };',
-          '   };',
-          '};']
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)], continue_cond = Symbol('x') < Symbol('y'))))).split('\n') == [
-          'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
-          '   for (m3 = 0; m3 < 4; m3 += 1) {',
-          '      for (m5 = 0; m5 < 6; m5 += 1) {',
+          '   for (_Dummy_2 = 0; _Dummy_2 < 4; _Dummy_2 += 1) {',
+          '      for (_Dummy_3 = 0; _Dummy_3 < 6; _Dummy_3 += 1) {',
           '         if (x < y) {',
           '            continue;',
           '         };',
-          '         if (m3 == m5) {',
+          '         if (_Dummy_2 == _Dummy_3) {',
           '            continue;',
           '         };',
-          '         x = m3;',
+          '         x[counter] = _Dummy_2;',
+          '         ++(counter);',
           '      };',
           '   };',
           '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;',
+                                                                   'int _Dummy_3;']
 
   p = p.set_pos(_Excl((1, 2), (m3, m5), {-1, 0, 1}))
   assert len(p) == 61
-  assert renum_dummy(cxxcode(CodeBlock(*p.generate_loop([Assignment(Symbol('x'), p.term)], continue_cond = Symbol('x') < Symbol('y'))))).split('\n') == [
+  assert renum_dummy(p.generate_loop_by_counter((Symbol('x'),), (p.term,), var_manager, Symbol('counter'), continue_cond = Symbol('x') < Symbol('y'))) == [
           'for (_Dummy_1 = 4; _Dummy_1 < 7; _Dummy_1 += 1) {',
-          '   for (m3 = 0; m3 < 4; m3 += 1) {',
-          '      for (m5 = 0; m5 < 6; m5 += 1) {',
+          '   for (_Dummy_2 = 0; _Dummy_2 < 4; _Dummy_2 += 1) {',
+          '      for (_Dummy_3 = 0; _Dummy_3 < 6; _Dummy_3 += 1) {',
           '         if (x < y) {',
           '            continue;',
           '         };',
-          '         if (m3 == -1 + m5 || m3 == 1 + m5 || m3 == m5) {',
+          '         if (_Dummy_2 == -1 + _Dummy_3 || _Dummy_2 == 1 + _Dummy_3 || _Dummy_2 == _Dummy_3) {',
           '            continue;',
           '         };',
-          '         x = m3;',
+          '         x[counter] = _Dummy_2;',
+          '         ++(counter);',
           '      };',
           '   };',
           '};']
+  assert renum_dummy(var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                   'int _Dummy_2;',
+                                                                   'int _Dummy_3;']
 
 
   print('ALL TESTS HAVE BEEN PASSED!!!')

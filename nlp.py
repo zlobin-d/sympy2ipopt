@@ -2,8 +2,7 @@
 
 from sympy import pprint, srepr
 from sympy import Symbol, S, IndexedBase, Idx, Tuple, Function, Derivative, diff, Piecewise, And, Eq, Add, UnevaluatedExpr, Sum
-from sympy.codegen.ast import Element, CodeBlock, Comment, Assignment, Print
-from sympy.codegen.cnodes import PreIncrement
+from sympy.codegen.ast import CodeBlock, Comment, Print
 from collections import OrderedDict, defaultdict
 from itertools import takewhile, combinations, starmap
 from functools import reduce
@@ -13,7 +12,7 @@ from sympy2ipopt.shifted_idx import ShiftedIdx
 from sympy2ipopt.indexed_base_with_offset import IndexedBaseWithOffset
 from sympy2ipopt.utils.idx_utils import get_master_idx, get_shifts, get_types, get_id, get_indices, block_shape, block_size, block_copy, IDummy, is_full_range
 from sympy2ipopt.utils.expr_utils import get_outer_indices, expr_var_indices, wrap_in_sum, RDummy, prepare_expr
-from sympy2ipopt.utils.code_utils import FPrint, If, elem_pos, indexed_for_array_elem, decl_for_indices, wrap_in_loop, assign_one, assign_by_indices, assign_by_counter, assign, offset_in_block, empty_operator_, cxxcode
+from sympy2ipopt.utils.code_utils import FPrint, elem_pos, indexed_for_array_elem, TmpVarManager, wrap_in_loop, assign_by_indices, assign_by_counter, assign, offset_in_block,cxxcode
 from sympy2ipopt.utils.block_utils import cmp_with_diag, Part, to_disjoint_parts
 from sympy2ipopt.utils.limitation_utils import check_idx, check_symbols, check_functions, check_for_disjoint_block_vars, check_for_exprs_with_int_limits
 from sympy2ipopt.utils.diff_utils import diff_indexed
@@ -130,25 +129,27 @@ class Nlp :
     # Порядок нужен, чтобы задать нумерацию ограничений
     self.__constraints = OrderedDict()
     self.__var_offset = S.Zero
-    self.__var_decl = set()
     self.__constr_offset = S.Zero
-    self.__constr_decl = set()
     self.__objective = None
+    self.__bounds_info_var_manager = TmpVarManager()
     self.__get_bounds_info_body = []
+    self.__starting_point_var_manager = TmpVarManager()
     self.__get_starting_point_body = []
+    self.__f_var_manager = TmpVarManager()
     self.__eval_f_body = []
+    self.__g_var_manager = TmpVarManager()
     self.__eval_g_body = []
-    self.__eval_grad_f_decl = set()
+    self.__grad_f_var_manager = TmpVarManager()
     self.__eval_grad_f_body = []
     self.__jac_non_zeros = S.Zero
-    self.__eval_jac_g_decl = set()
+    self.__jac_g_var_manager = TmpVarManager()
     self.__eval_jac_g_body_struct = [[f'int {self.__counter} = 0;']]
     self.__eval_jac_g_body = [[f'int {self.__counter} = 0;']]
     self.__hess_non_zeros = S.Zero
-    self.__eval_h_decl = set()
+    self.__hess_var_manager = TmpVarManager()
     self.__eval_h_body_struct = [[f'int {self.__counter} = 0;']]
     self.__eval_h_body = [[f'int {self.__counter} = 0;']]
-    self.__finalize_solution_decl = set()
+    self.__finalize_solution_manager = TmpVarManager()
     self.__finalize_solution_body = [['std::FILE *fp;']]
     self.__user_functions = {}
     self.__user_data = {}
@@ -505,6 +506,8 @@ class Nlp :
       if len(output_format) != 2 :
         print(f'Bad output_format for variable "{var}".')
         raise ValueError
+      get_vars = lambda idx : idx.subs(idx.label, self.__finalize_solution_manager.get_int_var())
+      output_format = (tuple(get_vars(idx) for idx in output_format[0]), tuple(get_vars(idx) for idx in output_format[1]))
       format_indices = list(output_format[0] + output_format[1])
       if set(get_types(format_indices)) != set(idx_types) or len(format_indices) != len(indices) :
         print(f'output_format indices is not corresponds to variable "{var}" indices.')
@@ -523,17 +526,15 @@ class Nlp :
       loop = wrap_in_loop(loop, row_out)
       body = [f'fp = std::fopen("{str(var)}.out", "w");'] + cxxcode(CodeBlock(*loop)).split('\n') + ['std::fclose(fp);']
       self.__finalize_solution_body.append(body)
-      # Добавляем определения переменных C++, соответствующих индексам (для использования в циклах)
-      self.__finalize_solution_decl.update(decl_for_indices(format_indices))
     # Храним зарегистрированные переменные в словаре OrderedDict:
     # ключ --- переменная
     # значение --- (позиция начала блока в одномерном массиве переменых задачи, tuple() или набор индексов блочной переменной)
     self.__variables[var] = (self.__var_offset, indices)
     # Добавляем код в тела функций get_bounds_info() и get_starting_point() интерфейса IpOpt
-    self.__get_bounds_info_body.append(assign_by_indices((self.__x_l, self.__x_u), (lower, upper), indices, self.__var_offset))
-    self.__get_starting_point_body.append(assign_by_indices((self.__x,), (starting_point,), indices, self.__var_offset))
-    # Добавляем определения переменных C++, соответствующих индексам (для использования в циклах)
-    self.__var_decl.update(decl_for_indices(indices))
+    self.__get_bounds_info_body.append(assign_by_indices((self.__x_l, self.__x_u), (lower, upper), indices, self.__bounds_info_var_manager, self.__var_offset))
+    self.__bounds_info_var_manager.free_all_vars()
+    self.__get_starting_point_body.append(assign_by_indices((self.__x,), (starting_point,), indices, self.__starting_point_var_manager, self.__var_offset))
+    self.__starting_point_var_manager.free_all_vars()
     # Увеличиваем счетчик переменных на размер блока (1 для простой перменной)
     self.__var_offset += block_size(indices)
     return var
@@ -623,7 +624,7 @@ class Nlp :
     if not self._check_expr(constr) :
       print('Attempt to add unallowable constraint.')
       raise ValueError
-    # Делаем индексы суммирования уникальными
+    # Делаем индексы суммирования уникальными среди всех выражений задачи
     constr = prepare_expr(constr)
     # Получаем индексы данного семейства ограничений
     indices = get_outer_indices(constr)
@@ -643,9 +644,8 @@ class Nlp :
     # значение --- (позиция начала блока семейства ограничений, tuple() или набор индексов)
     self.__constraints[constr] = (self.__constr_offset, indices)
     # Добавляем код в тело функции get_bounds_info() интерфейса IpOpt
-    self.__get_bounds_info_body.append(assign_by_indices((self.__g_l, self.__g_u), (lower, upper), indices, self.__constr_offset))
-    # Добавляем определения переменных C++, соответствующих индексам (для использования в циклах)
-    self.__constr_decl.update(decl_for_indices(indices))
+    self.__get_bounds_info_body.append(assign_by_indices((self.__g_l, self.__g_u), (lower, upper), indices, self.__bounds_info_var_manager, self.__constr_offset))
+    self.__bounds_info_var_manager.free_all_vars()
     # Увеличиваем счетчик ограничений на размер семейства
     self.__constr_offset += block_size(indices)
 
@@ -705,12 +705,13 @@ class Nlp :
   def __fill_eval_f_body(self) :
     '''Генерируем код вычисления целевого функционала.'''
 
-    self.__eval_f_body = [assign((self.__obj_value,), (self.__objective,))]
+    self.__eval_f_body = [assign((self.__obj_value,), (self.__objective,), (), self.__f_var_manager)]
 
   def __fill_eval_g_body(self) :
     '''Генерируем код вычисления ограничений.'''
     for constr, (offset, indices) in self.__constraints.items() :
-      self.__eval_g_body.append(assign_by_indices((self.__g,), (constr,), indices, offset))
+      self.__eval_g_body.append(assign_by_indices((self.__g,), (constr,), indices, self.__g_var_manager, offset))
+      self.__g_var_manager.free_all_vars()
 
   def __fill_eval_grad_f_body(self) :
     '''Генерируем код вычисления градиента целевого функционала.'''
@@ -722,8 +723,8 @@ class Nlp :
         # Аналитическое дифференцирование
         partial = self.__diff(self.__objective, var, used_indices, occurrences)
         # Добавляем код в тела соответствующих функций интерфейса IpOpt
-        self.__eval_grad_f_decl.update(decl_for_indices(used_indices))
-        self.__eval_grad_f_body.append(assign_by_indices((self.__grad_f,), (partial,), used_indices, offset, part_of = indices))
+        self.__eval_grad_f_body.append(assign_by_indices((self.__grad_f,), (partial,), used_indices, self.__grad_f_var_manager, offset, part_of = indices))
+        self.__grad_f_var_manager.free_all_vars()
 
   def __fill_eval_jac_g_body(self) :
     '''Генерируем код вычисления якобиана ограничений.'''
@@ -742,12 +743,13 @@ class Nlp :
             # Не используем множество, чтобы от запуска к запуску сохранялся порядок
             indices = constr_indices + tuple(idx for idx in get_master_idx(used_indices) if idx not in constr_indices)
             # Добавляем код в тела соответствующих функций интерфейса IpOpt
-            self.__eval_jac_g_decl.update(decl_for_indices(indices))
             self.__eval_jac_g_body_struct.append(assign_by_counter((self.__iRow, self.__jCol),
                                                                           (constr_offset + offset_in_block(constr_indices),
                                                                            var_offset + offset_in_block(used_indices, part_of = var_indices)),
-                                                                           indices, self.__counter))
-            self.__eval_jac_g_body.append(assign_by_counter((self.__values,), (grad,), indices, self.__counter))
+                                                                           indices, self.__jac_g_var_manager, self.__counter))
+            self.__jac_g_var_manager.free_all_vars()
+            self.__eval_jac_g_body.append(assign_by_counter((self.__values,), (grad,), indices, self.__jac_g_var_manager, self.__counter))
+            self.__jac_g_var_manager.free_all_vars()
             # Увеличиваем счетчик ненулевых элементов якобиана на размер семейства
             self.__jac_non_zeros += block_size(indices) 
 
@@ -820,17 +822,12 @@ class Nlp :
           if over != 0 :
             continue_cond = col > row
             size -= over
-        row_pre, row_body = assign_one(Element(self.__iRow, (self.__counter,)), row)
-        assert not row_pre
-        col_pre, col_body = assign_one(Element(self.__jCol, (self.__counter,)), col)
-        assert not col_pre
-        loop = p.generate_loop([*row_body, *col_body, PreIncrement(self.__counter)], continue_cond = continue_cond)
-        self.__eval_h_body_struct.append(cxxcode(CodeBlock(*loop)).split('\n'))
-        preambula, body = assign_one(Element(self.__values, (self.__counter,)), p.term, p.indices)
-        body.append(PreIncrement(self.__counter))
-        loop = p.generate_loop(body, continue_cond = continue_cond)
-        self.__eval_h_body.append(cxxcode(CodeBlock(*preambula, *loop)).split('\n'))
-        self.__eval_h_decl.update(decl_for_indices(p.indices))
+        loop = p.generate_loop_by_counter((self.__iRow, self.__jCol), (row, col), self.__hess_var_manager, self.__counter, continue_cond = continue_cond)
+        self.__eval_h_body_struct.append(loop)
+        self.__hess_var_manager.free_all_vars()
+        loop = p.generate_loop_by_counter((self.__values,), (p.term,), self.__hess_var_manager, self.__counter, continue_cond = continue_cond)
+        self.__eval_h_body.append(loop)
+        self.__hess_var_manager.free_all_vars()
         self.__hess_non_zeros += size
 
   def generate(self) :
@@ -860,10 +857,11 @@ class Nlp :
     self.__fill_eval_jac_g_body()
     self.__fill_eval_h_body()
 
-    self.__get_nlp_info_body = [assign((self.__n,), (S(self.__var_offset),)),
-                                assign((self.__m,), (S(self.__constr_offset),)),
-                                assign((self.__nnz_jac_g,), (S(self.__jac_non_zeros),)),
-                                assign((self.__nnz_h_lag,), (S(self.__hess_non_zeros),))]
+    # var_manager не нужен, так как присваиваются константы
+    self.__get_nlp_info_body = [assign((self.__n,), (S(self.__var_offset),), (), None),
+                                assign((self.__m,), (S(self.__constr_offset),), (), None),
+                                assign((self.__nnz_jac_g,), (S(self.__jac_non_zeros),), (), None),
+                                assign((self.__nnz_h_lag,), (S(self.__hess_non_zeros),), (), None)]
 
     generated_hpp = '''#ifndef __''' + self.__name.upper() + '''_HPP__
 #define __''' + self.__name.upper() + '''_HPP__
@@ -1051,7 +1049,7 @@ bool ''' + self.__name + '''::get_bounds_info(
    Number* g_u
 )
 {
-   ''' + '\n   '.join(sorted(self.__var_decl | self.__constr_decl)) + '''
+   ''' + '\n   '.join(self.__bounds_info_var_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__get_bounds_info_body]) + '''
 
@@ -1072,7 +1070,7 @@ bool ''' + self.__name + '''::get_starting_point(
    Number* lambda
 )
 {
-   ''' + '\n   '.join(sorted(self.__var_decl)) + '''
+   ''' + '\n   '.join(self.__starting_point_var_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__get_starting_point_body]) + '''
 
@@ -1088,6 +1086,7 @@ bool ''' + self.__name + '''::eval_f(
    Number&       obj_value
 )
 {
+   ''' + '\n   '.join(self.__f_var_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__eval_f_body]) + '''
 
@@ -1104,7 +1103,7 @@ bool ''' + self.__name + '''::eval_g(
    Number*       g
 )
 {
-   ''' + '\n   '.join(sorted(self.__constr_decl)) + '''
+   ''' + '\n   '.join(self.__g_var_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__eval_g_body]) + '''
 
@@ -1120,7 +1119,7 @@ bool ''' + self.__name + '''::eval_grad_f(
    Number*       grad_f
 )
 {
-   ''' + '\n   '.join(sorted(self.__eval_grad_f_decl)) + '''
+   ''' + '\n   '.join(self.__grad_f_var_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__eval_grad_f_body]) + '''
 
@@ -1140,7 +1139,7 @@ bool ''' + self.__name + '''::eval_jac_g(
    Number*       values
 )
 {
-   ''' + '\n   '.join(sorted(self.__eval_jac_g_decl)) + '''
+   ''' + '\n   '.join(self.__jac_g_var_manager.get_declarations_and_clear()) + '''
 
    if( values == NULL )
    {
@@ -1176,7 +1175,7 @@ bool ''' + self.__name + '''::eval_h(
    Number*       values
 )
 {
-   ''' + '\n   '.join(sorted(self.__eval_h_decl)) + '''
+   ''' + '\n   '.join(self.__hess_var_manager.get_declarations_and_clear()) + '''
 
    if( values == NULL )
    {
@@ -1213,7 +1212,7 @@ void ''' + self.__name + '''::finalize_solution(
    IpoptCalculatedQuantities* ip_cq
 )
 {
-   ''' + '\n   '.join(sorted(self.__finalize_solution_decl)) + '''
+   ''' + '\n   '.join(self.__finalize_solution_manager.get_declarations_and_clear()) + '''
 
    ''' + '\n\n   '.join(['\n   '.join(block) for block in self.__finalize_solution_body]) + '''
 }
@@ -1303,56 +1302,59 @@ void ''' + self.__name + '''::finalize_solution(
 
     assert nlp.__variables == OrderedDict([(r, (0, (i1, i2))), (y, (12, ())), (f, (13, (i1,))), (p, (16, (i1, i2)))])
     assert nlp.__var_offset == 28
-    assert nlp.__var_decl == {'int i1;', 'int i2;'}
     assert [to_expr(var) for var in nlp.__variables] == [IndexedBaseWithOffset(nlp.__x, (3, 4), -6),
                                    Indexed(IndexedBaseWithOffset(nlp.__x, (1,), 12), 0),
                                    IndexedBaseWithOffset(nlp.__x, (3,), 12),
                                    IndexedBaseWithOffset(nlp.__x, (3, 4), 10)]
-    assert nlp.__get_bounds_info_body == [[
-                                           'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                           '   for (i2 = 2; i2 < 6; i2 += 1) {',
-                                           '      x_l[-6 + 4*i1 + i2] = 0;',
-                                           '      x_u[-6 + 4*i1 + i2] = r0[-6 + 4*i1 + i2];',
-                                           '   };',
-                                           '};'
-                                          ], [
-                                           'x_l[12] = 5;',
-                                           'x_u[12] = 1.0e+19;'
-                                          ], [
-                                           'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                           '   x_l[12 + i1] = -1.0e+19;',
-                                           '   x_u[12 + i1] = fU;',
-                                           '};'
-                                          ], [
-                                           'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                           '   for (i2 = 2; i2 < 6; i2 += 1) {',
-                                           '      x_l[10 + 4*i1 + i2] = p0[-2 + i2];',
-                                           '      x_u[10 + 4*i1 + i2] = 10;',
-                                           '   };',
-                                           '};'
+    assert renum_dummy(nlp.__get_bounds_info_body) == [[
+                                            'for (_Dummy_1 = 1; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                            '   for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                            '      x_l[-6 + 4*_Dummy_1 + _Dummy_2] = 0;',
+                                            '      x_u[-6 + 4*_Dummy_1 + _Dummy_2] = r0[-6 + 4*_Dummy_1 + _Dummy_2];',
+                                            '   };',
+                                            '};'
+                                           ], [
+                                            'x_l[12] = 5;',
+                                            'x_u[12] = 1.0e+19;'
+                                           ], [
+                                            'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                            '   x_l[12 + _Dummy_2] = -1.0e+19;',
+                                            '   x_u[12 + _Dummy_2] = fU;', '};'
+                                           ], [
+                                            'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                            '   for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                            '      x_l[10 + 4*_Dummy_2 + _Dummy_1] = p0[-2 + _Dummy_1];',
+                                            '      x_u[10 + 4*_Dummy_2 + _Dummy_1] = 10;',
+                                            '   };',
+                                            '};'
                                           ]]
+    assert renum_dummy(nlp.__bounds_info_var_manager.get_declarations_and_clear()) == ['int _Dummy_2;',
+                                                                                       'int _Dummy_1;']
+
     get_bounds_info_body_len = len(nlp.__get_bounds_info_body)
 
 
-    assert nlp.__get_starting_point_body == [[
-                                              'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                              '   for (i2 = 2; i2 < 6; i2 += 1) {',
-                                              '      x[-6 + 4*i1 + i2] = 10;',
+    assert renum_dummy(nlp.__get_starting_point_body) == [[
+                                              'for (_Dummy_1 = 1; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                              '      x[-6 + 4*_Dummy_1 + _Dummy_2] = 10;',
                                               '   };',
                                               '};'
                                              ], [
                                               'x[12] = 10;'
                                              ], [
-                                              'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                              '   x[12 + i1] = fS;',
+                                              'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                              '   x[12 + _Dummy_2] = fS;',
                                               '};'
                                              ], [
-                                              'for (i1 = 1; i1 < 4; i1 += 1) {',
-                                              '   for (i2 = 2; i2 < 6; i2 += 1) {',
-                                              '      x[10 + 4*i1 + i2] = 8;',
+                                              'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                              '   for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                              '      x[10 + 4*_Dummy_2 + _Dummy_1] = 8;',
                                               '   };',
                                               '};'
-                                             ]]
+                                            ]]
+    assert renum_dummy(nlp.__starting_point_var_manager.get_declarations_and_clear()) == ['int _Dummy_2;',
+                                                                                          'int _Dummy_1;']
 
     assert nlp._check_expr(y**3)
     check_runtime_error(nlp.add_var, 'y', (), starting_point = S.Zero, lower = S.Zero, upper = S.Zero)
@@ -1387,33 +1389,34 @@ void ''' + self.__name + '''::finalize_solution(
 
     assert nlp.__constraints == OrderedDict([(y**3, (0, ())), (r[j1, j2]**f[sj1], (1, (j1, j2))), ((p[sj1, i2] + r[sj1, i2])**2, (7, (i2, j1))), (p[j1, j2] + Sum(r[j1, i2]**2, (i2, 2, 5)), (15, (j1, j2)))])
     assert nlp.__constr_offset == 21
-    assert nlp.__constr_decl == {'int j1;', 'int j2;', 'int i2;'}
 
-    assert nlp.__get_bounds_info_body[get_bounds_info_body_len:] == [[
+    assert renum_dummy(nlp.__get_bounds_info_body[get_bounds_info_body_len:]) == [[
                                                                       'g_l[0] = 30;',
                                                                       'g_u[0] = 1.0e+19;'
                                                                      ], [
-                                                                      'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                                                      '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                                                      '      g_l[-7 + 3*j1 + j2] = -1.0e+19;',
-                                                                      '      g_u[-7 + 3*j1 + j2] = 100;',
+                                                                      'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                                                      '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                                                      '      g_l[-7 + 3*_Dummy_1 + _Dummy_2] = -1.0e+19;',
+                                                                      '      g_u[-7 + 3*_Dummy_1 + _Dummy_2] = 100;',
                                                                       '   };',
                                                                       '};'
                                                                      ], [
-                                                                      'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                                                      '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                                                      '      g_l[1 + 2*i2 + j1] = 0;',
-                                                                      '      g_u[1 + 2*i2 + j1] = c0[-10 + 4*j1 + i2];',
+                                                                      'for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                                                      '   for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                                                      '      g_l[1 + 2*_Dummy_2 + _Dummy_1] = 0;',
+                                                                      '      g_u[1 + 2*_Dummy_2 + _Dummy_1] = c0[-10 + 4*_Dummy_1 + _Dummy_2];',
                                                                       '   };',
                                                                       '};'
-                                                                      ], [
-                                                                       'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                                                       '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                                                       '      g_l[7 + 3*j1 + j2] = 10;',
-                                                                       '      g_u[7 + 3*j1 + j2] = 100;',
-                                                                       '   };',
-                                                                       '};'
-                                                                     ]]
+                                                                     ], [
+                                                                      'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                                                      '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                                                      '      g_l[7 + 3*_Dummy_1 + _Dummy_2] = 10;',
+                                                                      '      g_u[7 + 3*_Dummy_1 + _Dummy_2] = 100;',
+                                                                      '   };',
+                                                                      '};'
+                                                                    ]]
+    assert renum_dummy(nlp.__bounds_info_var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                                       'int _Dummy_2;']
 
     l1 = t1('l1')
     l2 = t2('l2')
@@ -1459,7 +1462,7 @@ void ''' + self.__name + '''::finalize_solution(
     assert nlp.__diff(G(y1, y2, y3) + y2**2, y3, (), ()) == F(y1, y2, y3)
     assert nlp.__diff(G(y1, r[i1, i2], y3)**2 + y2**2, r, (i1, i2), (r[i1, i2],)) == 2 * ((y1 * r[i1, i2] + 5) * G(y1, r[i1, i2], y3))
 
-    assert cxxcode(G(y1, r[i1, i2], y3)**2 + y2**2) == 'std::pow(y2, 2) + std::pow(G(y1, x[-6 + 4*i1 + i2], y3), 2)'
+    assert cxxcode(G(y1, r[i1, i2], y3)**2 + y2**2) == '(y2*y2) + (G(y1, x[-6 + 4*i1 + i2], y3)*G(y1, x[-6 + 4*i1 + i2], y3))'
 
     assert nlp.__vars_is_added
     assert not nlp.__target_and_constrs_is_added
@@ -1473,186 +1476,193 @@ void ''' + self.__name + '''::finalize_solution(
 
     nlp.__fill_eval_f_body()
     assert renum_dummy(nlp.__eval_f_body) == [[
-                                  'int _Dummy_3;',
-                                  'int _Dummy_4;',
-                                  'int _Dummy_5;',
-                                  'int _Dummy_6;',
-                                  'double _Dummy_1 = 0.0;',
-                                  'for (_Dummy_3 = 1; _Dummy_3 < 4; _Dummy_3 += 1) {',
-                                  '   for (_Dummy_4 = 2; _Dummy_4 < 6; _Dummy_4 += 1) {',
-                                  '      _Dummy_1 += std::pow(x[10 + 4*_Dummy_3 + _Dummy_4], 2);',
-                                  '   };',
-                                  '};',
-                                  'double _Dummy_2 = 0.0;',
-                                  'for (_Dummy_5 = 1; _Dummy_5 < 4; _Dummy_5 += 1) {',
-                                  '   for (_Dummy_6 = 2; _Dummy_6 < 6; _Dummy_6 += 1) {',
-                                  '      _Dummy_2 += std::pow(x[12 + _Dummy_5], 2) + std::pow(x[-6 + 4*_Dummy_5 + _Dummy_6], 2);',
-                                  '   };',
-                                  '};',
-                                  'obj_value = _Dummy_1 + _Dummy_2;'
-                                 ]] 
+                                   '_Dummy_1 = 0.0;',
+                                   'for (_Dummy_3 = 1; _Dummy_3 < 4; _Dummy_3 += 1) {',
+                                   '   for (_Dummy_4 = 2; _Dummy_4 < 6; _Dummy_4 += 1) {',
+                                   '      _Dummy_1 += (x[10 + 4*_Dummy_3 + _Dummy_4]*x[10 + 4*_Dummy_3 + _Dummy_4]);',
+                                   '   };',
+                                   '};',
+                                   '_Dummy_2 = 0.0;',
+                                   'for (_Dummy_5 = 1; _Dummy_5 < 4; _Dummy_5 += 1) {',
+                                   '   for (_Dummy_6 = 2; _Dummy_6 < 6; _Dummy_6 += 1) {',
+                                   '      _Dummy_2 += (x[12 + _Dummy_5]*x[12 + _Dummy_5]) + (x[-6 + 4*_Dummy_5 + _Dummy_6]*x[-6 + 4*_Dummy_5 + _Dummy_6]);',
+                                   '   };',
+                                   '};',
+                                   'obj_value = _Dummy_1 + _Dummy_2;'
+                                 ]]
+    assert renum_dummy(nlp.__f_var_manager.get_declarations_and_clear()) == ['int _Dummy_3;',
+                                                                             'int _Dummy_4;',
+                                                                             'int _Dummy_5;',
+                                                                             'int _Dummy_6;',
+                                                                             'double _Dummy_1;',
+                                                                             'double _Dummy_2;']
     nlp.__fill_eval_g_body()
     assert renum_dummy(nlp.__eval_g_body) == [[
-                                  'g[0] = std::pow(x[12], 3);'
-                                 ], [
-                                  'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                  '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                  '      g[-7 + 3*j1 + j2] = std::pow(x[-6 + 4*j1 + j2], x[11 + j1]);',
-                                  '   };',
-                                  '};'
-                                 ], [
-                                  'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                  '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                  '      g[1 + 2*i2 + j1] = std::pow(x[-10 + 4*j1 + i2] + x[6 + 4*j1 + i2], 2);',
-                                  '   };',
-                                  '};'
-                                 ], [
-                                  'int _Dummy_2;',
-                                  'double _Dummy_1;',
-                                  'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                  '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                  '      _Dummy_1 = 0.0;',
-                                  '      for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
-                                  '         _Dummy_1 += std::pow(x[-6 + 4*j1 + _Dummy_2], 2);',
-                                  '      };',
-                                  '      g[7 + 3*j1 + j2] = _Dummy_1 + x[10 + 4*j1 + j2];',
-                                  '   };',
-                                  '};'
+                                   'g[0] = (x[12]*x[12]*x[12]);'
+                                  ], [
+                                   'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                   '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                   '      g[-7 + 3*_Dummy_1 + _Dummy_2] = std::pow(x[-6 + 4*_Dummy_1 + _Dummy_2], x[11 + _Dummy_1]);',
+                                   '   };',
+                                   '};'
+                                  ], [
+                                   'for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                   '   for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                   '      _Dummy_3 = x[-10 + 4*_Dummy_1 + _Dummy_2] + x[6 + 4*_Dummy_1 + _Dummy_2];',
+                                   '      g[1 + 2*_Dummy_2 + _Dummy_1] = (_Dummy_3*_Dummy_3);',
+                                   '   };',
+                                   '};'
+                                  ], [
+                                   'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                   '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                   '      _Dummy_3 = 0.0;',
+                                   '      for (_Dummy_4 = 2; _Dummy_4 < 6; _Dummy_4 += 1) {',
+                                   '         _Dummy_3 += (x[-6 + 4*_Dummy_1 + _Dummy_4]*x[-6 + 4*_Dummy_1 + _Dummy_4]);',
+                                   '      };',
+                                   '      g[7 + 3*_Dummy_1 + _Dummy_2] = _Dummy_3 + x[10 + 4*_Dummy_1 + _Dummy_2];',
+                                   '   };',
+                                   '};'
                                  ]]
+
+    assert renum_dummy(nlp.__g_var_manager.get_declarations_and_clear()) == ['int _Dummy_1;',
+                                                                             'int _Dummy_2;',
+                                                                             'int _Dummy_4;',
+                                                                             'double _Dummy_3;']
 
     nlp.__fill_eval_grad_f_body()
     assert renum_dummy(nlp.__eval_grad_f_body) == [[
-                                       'for (_Dummy_1 = 1; _Dummy_1 < 4; _Dummy_1 += 1) {',
-                                       '   for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
-                                       '      grad_f[-6 + 4*_Dummy_1 + _Dummy_2] = 2*x[-6 + 4*_Dummy_1 + _Dummy_2];',
-                                       '   };',
-                                       '};'
-                                      ], [
-                                       'grad_f[12] = 0;'
-                                      ], [
-                                       'for (_Dummy_8 = 1; _Dummy_8 < 4; _Dummy_8 += 1) {',
-                                       '   grad_f[12 + _Dummy_8] = 8*x[12 + _Dummy_8];',
-                                       '};'
-                                      ], [
-                                       'for (_Dummy_15 = 1; _Dummy_15 < 4; _Dummy_15 += 1) {',
-                                       '   for (_Dummy_16 = 2; _Dummy_16 < 6; _Dummy_16 += 1) {',
-                                       '      grad_f[10 + 4*_Dummy_15 + _Dummy_16] = 2*x[10 + 4*_Dummy_15 + _Dummy_16];',
-                                       '   };',
-                                       '};'
+                                        'for (_Dummy_1 = 1; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                        '   for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                        '      grad_f[-6 + 4*_Dummy_1 + _Dummy_2] = 2*x[-6 + 4*_Dummy_1 + _Dummy_2];',
+                                        '   };',
+                                        '};'
+                                       ], [
+                                        'grad_f[12] = 0;'
+                                       ], [
+                                        'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                        '   grad_f[12 + _Dummy_2] = 8*x[12 + _Dummy_2];',
+                                        '};'
+                                       ], [
+                                        'for (_Dummy_2 = 1; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                        '   for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                        '      grad_f[10 + 4*_Dummy_2 + _Dummy_1] = 2*x[10 + 4*_Dummy_2 + _Dummy_1];',
+                                        '   };',
+                                        '};'
                                       ]]
-    assert renum_dummy(nlp.__eval_grad_f_decl) == {'int _Dummy_1;', 'int _Dummy_15;', 'int _Dummy_2;', 'int _Dummy_8;', 'int _Dummy_16;'}
+    assert renum_dummy(nlp.__grad_f_var_manager.get_declarations_and_clear()) == ['int _Dummy_2;',
+                                                                                  'int _Dummy_1;']
 
     nlp.__fill_eval_jac_g_body()
-    assert nlp.__eval_jac_g_body == [[
-                                      'int counter = 0;'
-                                     ], [
-                                      'values[counter] = 3*std::pow(x[12], 2);',
-                                      '++(counter);'
-                                     ], [
-                                      'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                      '      values[counter] = std::pow(x[-6 + 4*j1 + j2], x[11 + j1])*x[11 + j1]/x[-6 + 4*j1 + j2];',
-                                      '      ++(counter);',
-                                      '   };',
-                                      '};'
-                                     ], [
-                                      'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                      '      values[counter] = std::pow(x[-6 + 4*j1 + j2], x[11 + j1])*std::log(x[-6 + 4*j1 + j2]);',
-                                      '      ++(counter);',
-                                      '   };',
-                                      '};'
-                                     ], [
-                                      'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                      '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '      values[counter] = 2*x[-10 + 4*j1 + i2] + 2*x[6 + 4*j1 + i2];',
-                                      '      ++(counter);',
-                                      '   };',
-                                      '};'
-                                     ], [
-                                      'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                      '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '      values[counter] = 2*x[-10 + 4*j1 + i2] + 2*x[6 + 4*j1 + i2];',
-                                      '      ++(counter);',
-                                      '   };',
-                                      '};'
-                                     ], [
-                                      'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                      '      for (i2 = 2; i2 < 6; i2 += 1) {',
-                                      '         values[counter] = 2*x[-6 + 4*j1 + i2];',
-                                      '         ++(counter);',
-                                      '      };',
-                                      '   };',
-                                      '};'
-                                     ], [
-                                      'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                      '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                      '      values[counter] = 1;',
-                                      '      ++(counter);',
-                                      '   };',
-                                      '};'
+    assert renum_dummy(nlp.__eval_jac_g_body) == [[
+                                       'int counter = 0;'
+                                      ], [
+                                       'values[counter] = 3*(x[12]*x[12]);',
+                                       '++(counter);'
+                                      ], [
+                                       'for (_Dummy_2 = 2; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                       '   for (_Dummy_1 = 2; _Dummy_1 < 5; _Dummy_1 += 1) {',
+                                       '      values[counter] = std::pow(x[-6 + 4*_Dummy_2 + _Dummy_1], x[11 + _Dummy_2])*x[11 + _Dummy_2]/x[-6 + 4*_Dummy_2 + _Dummy_1];',
+                                       '      ++(counter);',
+                                       '   };',
+                                       '};'
+                                      ], [
+                                       'for (_Dummy_2 = 2; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                       '   for (_Dummy_1 = 2; _Dummy_1 < 5; _Dummy_1 += 1) {',
+                                       '      values[counter] = std::pow(x[-6 + 4*_Dummy_2 + _Dummy_1], x[11 + _Dummy_2])*std::log(x[-6 + 4*_Dummy_2 + _Dummy_1]);',
+                                       '      ++(counter);',
+                                       '   };',
+                                       '};'
+                                      ], [
+                                       'for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                       '   for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                       '      values[counter] = 2*x[-10 + 4*_Dummy_1 + _Dummy_2] + 2*x[6 + 4*_Dummy_1 + _Dummy_2];',
+                                       '      ++(counter);',
+                                       '   };',
+                                       '};'
+                                      ], [
+                                       'for (_Dummy_2 = 2; _Dummy_2 < 6; _Dummy_2 += 1) {',
+                                       '   for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                       '      values[counter] = 2*x[-10 + 4*_Dummy_1 + _Dummy_2] + 2*x[6 + 4*_Dummy_1 + _Dummy_2];',
+                                       '      ++(counter);',
+                                       '   };',
+                                       '};'
+                                      ], [
+                                       'for (_Dummy_9 = 2; _Dummy_9 < 4; _Dummy_9 += 1) {',
+                                       '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                       '      for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                       '         values[counter] = 2*x[-6 + 4*_Dummy_9 + _Dummy_1];',
+                                       '         ++(counter);',
+                                       '      };',
+                                       '   };',
+                                       '};'
+                                      ], [
+                                       'for (_Dummy_2 = 2; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                       '   for (_Dummy_1 = 2; _Dummy_1 < 5; _Dummy_1 += 1) {',
+                                       '      values[counter] = 1;',
+                                       '      ++(counter);',
+                                       '   };',
+                                       '};'
                                      ]]
+    assert renum_dummy(nlp.__jac_g_var_manager.get_declarations_and_clear()) == ['int _Dummy_9;',
+                                                                                 'int _Dummy_2;',
+                                                                                 'int _Dummy_1;']
 
-    assert nlp.__eval_jac_g_body_struct == [[
-                                             'int counter = 0;'
-                                            ], [
-                                             'iRow[counter] = 0;',
-                                             'jCol[counter] = 12;',
-                                             '++(counter);'
-                                            ], [
-                                             'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                             '      iRow[counter] = -7 + 3*j1 + j2;',
-                                             '      jCol[counter] = -6 + 4*j1 + j2;',
-                                             '      ++(counter);',
-                                             '   };',
-                                             '};'
-                                            ], [
-                                             'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                             '      iRow[counter] = -7 + 3*j1 + j2;',
-                                             '      jCol[counter] = 11 + j1;',
-                                             '      ++(counter);',
-                                             '   };',
-                                             '};'
-                                            ], [
-                                             'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                             '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '      iRow[counter] = 1 + 2*i2 + j1;',
-                                             '      jCol[counter] = -10 + 4*j1 + i2;',
-                                             '      ++(counter);',
-                                             '   };',
-                                             '};'
-                                            ], [
-                                             'for (i2 = 2; i2 < 6; i2 += 1) {',
-                                             '   for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '      iRow[counter] = 1 + 2*i2 + j1;',
-                                             '      jCol[counter] = 6 + 4*j1 + i2;',
-                                             '      ++(counter);',
-                                             '   };',
-                                             '};'
-                                            ], [
-                                             'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                             '      for (i2 = 2; i2 < 6; i2 += 1) {',
-                                             '         iRow[counter] = 7 + 3*j1 + j2;',
-                                             '         jCol[counter] = -6 + 4*j1 + i2;',
-                                             '         ++(counter);',
-                                             '      };',
-                                             '   };',
-                                             '};'
-                                            ], [
-                                             'for (j1 = 2; j1 < 4; j1 += 1) {',
-                                             '   for (j2 = 2; j2 < 5; j2 += 1) {',
-                                             '      iRow[counter] = 7 + 3*j1 + j2;',
-                                             '      jCol[counter] = 10 + 4*j1 + j2;',
-                                             '      ++(counter);',
-                                             '   };',
-                                             '};'
+    assert renum_dummy(nlp.__eval_jac_g_body_struct) == [[
+                                              'int counter = 0;'
+                                             ], [
+                                              'iRow[counter] = 0;',
+                                              'jCol[counter] = 12;',
+                                              '++(counter);'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                              '      iRow[counter] = -7 + 3*_Dummy_1 + _Dummy_2;',
+                                              '      jCol[counter] = -6 + 4*_Dummy_1 + _Dummy_2;',
+                                              '      ++(counter);', '   };',
+                                              '};'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                              '      iRow[counter] = -7 + 3*_Dummy_1 + _Dummy_2;',
+                                              '      jCol[counter] = 11 + _Dummy_1;',
+                                              '      ++(counter);',
+                                              '   };',
+                                              '};'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                              '      iRow[counter] = 1 + 2*_Dummy_1 + _Dummy_2;',
+                                              '      jCol[counter] = -10 + 4*_Dummy_2 + _Dummy_1;',
+                                              '      ++(counter);',
+                                              '   };',
+                                              '};'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 6; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 4; _Dummy_2 += 1) {',
+                                              '      iRow[counter] = 1 + 2*_Dummy_1 + _Dummy_2;',
+                                              '      jCol[counter] = 6 + 4*_Dummy_2 + _Dummy_1;',
+                                              '      ++(counter);',
+                                              '   };',
+                                              '};'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                              '      for (_Dummy_9 = 2; _Dummy_9 < 6; _Dummy_9 += 1) {',
+                                              '         iRow[counter] = 7 + 3*_Dummy_1 + _Dummy_2;',
+                                              '         jCol[counter] = -6 + 4*_Dummy_1 + _Dummy_9;',
+                                              '         ++(counter);',
+                                              '      };',
+                                              '   };',
+                                              '};'
+                                             ], [
+                                              'for (_Dummy_1 = 2; _Dummy_1 < 4; _Dummy_1 += 1) {',
+                                              '   for (_Dummy_2 = 2; _Dummy_2 < 5; _Dummy_2 += 1) {',
+                                              '      iRow[counter] = 7 + 3*_Dummy_1 + _Dummy_2;',
+                                              '      jCol[counter] = 10 + 4*_Dummy_1 + _Dummy_2;',
+                                              '      ++(counter);',
+                                              '   };',
+                                              '};'
                                             ]]
-
-    assert nlp.__eval_jac_g_decl == {'int i2;', 'int j2;', 'int j1;'}
 
     assert nlp.__jac_non_zeros == 59
 
