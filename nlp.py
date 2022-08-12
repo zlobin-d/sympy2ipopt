@@ -286,6 +286,9 @@ class Nlp :
     if not is_full_range(indices) :
       print(f'Data "{name}" indices do not determine whole block with respect to index types.')
       raise ValueError
+    if len(set(indices)) != len(indices) :
+      print(f'Data "{name}" indices contains at least two identical elements.')
+      raise ValueError
     size = block_size(indices)
     if indices :
       if init != None :
