@@ -19,6 +19,7 @@ empty_operator_ = EmptyOperator()
 
 class If(Token) :
   __slots__ = ('condition', 'body', 'else_branch')
+  _fields = __slots__
   defaults = {'else_branch' : []}
   _construct_condition = staticmethod(_sympify)
   @classmethod
