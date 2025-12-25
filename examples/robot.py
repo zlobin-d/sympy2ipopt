@@ -41,7 +41,7 @@ u_phi = nlp.add_var('u_phi', (i,), starting_point = S.Zero, lower = -max_u_phi, 
 # The step and the final time.
 
 tf = nlp.add_var('tf', starting_point = S.One)
-step = tf / nh;
+step = tf / nh
 
 # The moments of inertia.
 
