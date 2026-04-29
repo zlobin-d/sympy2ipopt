@@ -654,7 +654,7 @@ if __name__ == "__main__" :
   assert renum_dummy(assign((obj_value, Symbol('y')), ((sin(x)+1)**2 / sin(x)**(sin(x)+1), sin(x)**3+sin(x)+1), (), var_manager, do_cse = True)) == [
                                                                                              '_Dummy_1 = std::sin(x);',
                                                                                              '_Dummy_2 = 1 + _Dummy_1;',
-                                                                                             'obj_value = std::pow(_Dummy_1, -1 - _Dummy_1)*(_Dummy_2*_Dummy_2);',
+                                                                                             'obj_value = std::pow(_Dummy_1, -_Dummy_2)*(_Dummy_2*_Dummy_2);',
                                                                                              'y = (_Dummy_1*_Dummy_1*_Dummy_1) + _Dummy_2;']
   assert renum_dummy(var_manager.get_declarations_and_clear()) == ['double _Dummy_1;',
                                                                    'double _Dummy_2;']
@@ -665,7 +665,7 @@ if __name__ == "__main__" :
                                                   '_Dummy_2 = 1 + _Dummy_1;',
                                                   '_Dummy_3 = 0.0;',
                                                   'for (_Dummy_4 = 0; _Dummy_4 < 11; _Dummy_4 += 1) {',
-                                                  '   _Dummy_3 += std::pow(_Dummy_1, -1 - _Dummy_1)*(_Dummy_2*_Dummy_2)*b1[_Dummy_4];',
+                                                  '   _Dummy_3 += std::pow(_Dummy_1, -_Dummy_2)*(_Dummy_2*_Dummy_2)*b1[_Dummy_4];',
                                                   '};',
                                                   '_Dummy_5 = 0.0;',
                                                   'for (_Dummy_6 = 2; _Dummy_6 < 9; _Dummy_6 += 1) {',
@@ -692,7 +692,7 @@ if __name__ == "__main__" :
                                                   '_Dummy_2 = 1 + _Dummy_1;',
                                                   '_Dummy_4 = 0.0;',
                                                   'for (_Dummy_5 = 0; _Dummy_5 < 11; _Dummy_5 += 1) {',
-                                                  '   _Dummy_4 += std::pow(_Dummy_1, -1 - _Dummy_1)*(_Dummy_2*_Dummy_2)*b1[_Dummy_5];',
+                                                  '   _Dummy_4 += std::pow(_Dummy_1, -_Dummy_2)*(_Dummy_2*_Dummy_2)*b1[_Dummy_5];',
                                                   '};',
                                                   '_Dummy_6 = 0.0;',
                                                   'for (_Dummy_7 = 2; _Dummy_7 < 9; _Dummy_7 += 1) {',
