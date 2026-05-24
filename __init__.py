@@ -34,5 +34,6 @@ API sympy2ipopt, требования к символьным переменны
 from sympy2ipopt.nlp import Nlp
 from sympy2ipopt.idx_type import IdxType
 from sympy2ipopt.shifted_idx import ShiftedIdx
+from sympy2ipopt.cauchy import CauchyProblem, CauchySolution
 
-__all__ = ['Nlp', 'IdxType', 'ShiftedIdx']
+__all__ = ['Nlp', 'IdxType', 'ShiftedIdx', 'CauchyProblem', 'CauchySolution']

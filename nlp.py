@@ -685,17 +685,22 @@ class Nlp :
   def __subs_user_func_derivative(self, expr) :
     '''Подставляем в выражжение частные производные пользовательских функций. '''
 
+    def subs_derivative(derivative) :
+      func, *vars_with_order = derivative.args
+      result = func
+      for arg, order in vars_with_order :
+        for _ in range(order) :
+          grad = self.__user_functions.get(result.func, None)
+          if grad == None :
+            print(f'Function "{result.func}" or its gradient is unknown!')
+            raise RuntimeError
+          partial = prepare_expr(grad[result.args.index(arg)](*result.args))
+          result = self.__subs_user_func_derivative(partial)
+      return result
+
     derivatives = expr.atoms(Derivative)
     for d in derivatives :
-      func, (arg, order), *other = d.args
-      # Не должны появляться частные производные порядка больше 1
-      assert not other and order == 1
-      grad = self.__user_functions.get(func.func, None)
-      if grad == None :
-        print(f'Function "{func.func}" or its gradient is unknown!')
-        raise RuntimeError
-      partial = prepare_expr(grad[func.args.index(arg)](*func.args))
-      expr = expr.subs(d, partial)
+      expr = expr.xreplace({d : subs_derivative(d)})
     return expr
 
   def __diff(self, expr, var, indices, occurrences) :
